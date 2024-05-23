@@ -469,7 +469,8 @@ class TransformerLanguageModel(MegatronModule):
                 enc_dec_attn_mask=None, tokentype_ids=None,
                 inference_params=None,
                 pooling_sequence_index=0,
-                enc_hidden_states=None, output_enc_hidden=False):
+                enc_hidden_states=None, output_enc_hidden=False,
+                micro_sp_idx=None):
 
         # Encoder embedding.
         if self.pre_process:
@@ -504,7 +505,8 @@ class TransformerLanguageModel(MegatronModule):
                     retriever_input=retriever_input,
                     retriever_attn_mask=retriever_attn_mask,
                     inference_params=inference_params,
-                    rotary_pos_emb=rotary_pos_emb)
+                    rotary_pos_emb=rotary_pos_emb,
+                    micro_sp_idx=micro_sp_idx)
             else:
                 encoder_output = self.encoder_hidden_state
         else:

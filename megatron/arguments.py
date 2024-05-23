@@ -417,7 +417,7 @@ def core_transformer_config_from_args(args):
             kw_args[f.name] = getattr(args, f.name)
     kw_args['persist_layer_norm'] = not args.no_persist_layer_norm
     kw_args['layernorm_zero_centered_gamma'] = args.apply_layernorm_1p
-    kw_args['deallocate_pipeline_outputs'] = True
+    kw_args['deallocate_pipeline_outputs'] = True 
     kw_args['pipeline_dtype'] = args.params_dtype
     kw_args['batch_p2p_comm'] = not args.overlap_p2p_comm
     if args.swiglu:
@@ -729,6 +729,10 @@ def _add_training_args(parser):
                        'use micro-batch-size * data-parallel-size as the '
                        'global batch size. This choice will result in 1 for '
                        'number of micro-batches.')
+    group.add_argument('--pipe-sp-splits', type=int, default=1,
+                       help='num micro sequence')
+    group.add_argument('--pipe-sp-strategy', type=str, default="average", choices=['average','uniform_comp'],
+                       help='how to split sequence exactly')
     group.add_argument('--rampup-batch-size', nargs='*', default=None,
                        help='Batch size ramp up with the following values:'
                        '  --rampup-batch-size <start batch size> '

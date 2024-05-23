@@ -272,12 +272,18 @@ def _communicate(
 
     # Create placeholder tensors for receive in forward and backward directions
     # if needed.
+        
     tensor_recv_prev = None
     tensor_recv_next = None
 
-    if not config.variable_seq_lengths:
+    if not config.variable_seq_lengths and not hasattr(config, "shape_queue"):
         recv_prev_shape = tensor_shape
         recv_next_shape = tensor_shape
+    elif config.shape_queue is not None:
+        if recv_prev:
+            recv_prev_shape = config.shape_queue['recv_forward'].get()
+        if recv_next:
+            recv_next_shape = config.shape_queue['recv_backward'].get()
     else:
         recv_prev_shape, recv_next_shape = _communicate_shapes(
             tensor_send_next, tensor_send_prev, recv_prev, recv_next, config
@@ -286,7 +292,7 @@ def _communicate(
     if recv_prev:
         if config.pipeline_dtype is None:
             raise RuntimeError("pipeline_dtype must be provided if recv_prev is True")
-        if tensor_shape is None:
+        if recv_prev_shape is None:
             raise RuntimeError(
                 "tensor_shape must be specified if recv_prev is True. "
                 "Common tensor_shape is (seq_length, micro_batch_size, hidden_size)"
@@ -300,7 +306,7 @@ def _communicate(
     if recv_next:
         if config.pipeline_dtype is None:
             raise RuntimeError("dtype must be provided if recv_next is True")
-        if tensor_shape is None:
+        if recv_next_shape is None:
             raise RuntimeError(
                 "tensor_shape must be specified if recv_next is True. "
                 "Common tensor_shape is (seq_length, micro_batch_size, hidden_size)"

@@ -23,7 +23,7 @@ try:
     from einops import rearrange
 except ImportError:
     rearrange = None
-
+from flash_attn.flash_attn_interface import _flash_attn_varlen_forward, _flash_attn_varlen_backward
 try:
     from flash_attn.flash_attn_interface import flash_attn_unpadded_func
 except ImportError:
@@ -31,6 +31,136 @@ except ImportError:
         from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_unpadded_func
     except ImportError:
         flash_attn_unpadded_func = None
+
+def kv_sp_flash_func(q, k, v,  kv_cache, softmax_scale, causal):
+    out = FlashAttnVarlenFunc.apply(q, k, v, kv_cache, 0.0, causal, softmax_scale)
+    return out
+
+class FlashAttnVarlenFunc(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        q,
+        k,
+        v,
+        kv_cache,
+        dropout_p,
+        causal,
+        softmax_scale,
+    ):
+        if softmax_scale is None:
+            softmax_scale = q.shape[-1] ** (-0.5)
+        batch_size = q.shape[0]
+        if 'k_cache'  in kv_cache:
+            k_cache, v_cache = kv_cache['k_cache'], kv_cache['v_cache']
+            offset = k_cache.shape[1]
+            k_whole = torch.cat([k_cache, k], dim=1).contiguous()
+            v_whole = torch.cat([v_cache, v], dim=1).contiguous()
+        else:
+            offset = 0
+            k_whole = k
+            v_whole = v
+        kv_cache['k_cache'], kv_cache['v_cache'] = k_whole, v_whole 
+        seqlen_k = k_whole.shape[1]
+        seqlen_q = q.shape[1]
+        ctx._seqlen_k = seqlen_k
+        ctx._seqlen_q = seqlen_q
+        ctx._offset = offset
+        q, k_whole, v_whole = [rearrange(x, 'b s ... -> (b s) ...').contiguous() for x in [q, k_whole, v_whole]]
+        cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32, device="cuda")
+        cu_seqlens_k = torch.arange(0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32, device="cuda")
+
+        q = q.contiguous()
+        k_whole = k_whole.contiguous()
+        v_whole = v_whole.contiguous()
+        out, q, k_whole, v_whole, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_varlen_forward(
+            q,
+            k_whole,
+            v_whole,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            seqlen_q,
+            seqlen_k,
+            dropout_p,
+            softmax_scale,
+            causal=causal,
+            window_size=(-1, -1),
+            alibi_slopes=None,
+            return_softmax=False,
+        )
+        ctx._kv_cache = kv_cache
+        ctx.save_for_backward(
+            q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state,
+
+        )
+        ctx.dropout_p = dropout_p
+        ctx.softmax_scale = softmax_scale
+        ctx.causal = causal
+        return out 
+
+    @staticmethod
+    def backward(ctx, dout, *args):
+        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state = ctx.saved_tensors
+        k_whole = ctx._kv_cache['k_cache']
+        v_whole = ctx._kv_cache['v_cache']
+        batch_size = q.size(0) // ctx._seqlen_q
+        pk = k_whole[:, :ctx._seqlen_k]
+        pv = v_whole[:, :ctx._seqlen_k].contiguous()
+        ctx._kv_cache['k_cache'], ctx._kv_cache['v_cache'] = pk[:, :-ctx._seqlen_q], pv[:, :-ctx._seqlen_q]
+        pk, pv = [rearrange(x, 'b s ... -> (b s) ...') for x in [pk, pv]]
+        pk = pk.contiguous()
+        pv = pv.contiguous()
+        q = q.contiguous()
+        # from megatron.core.pipeline_parallel.schedules import print_log
+        # print_rank(k_whole.shape, 7)
+        # print_rank(f"seqlen: {ctx._seqlen_k}", 7)
+        last_idx = not 'k_grad' in ctx._kv_cache
+        dq, dk, dv = torch.empty_like(q), torch.empty_like(pk), torch.empty_like(pv)
+        _flash_attn_varlen_backward(
+            dout,
+            q,
+            pk,
+            pv,
+            out,
+            softmax_lse,
+            dq,
+            dk,
+            dv,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            ctx._seqlen_q,
+            ctx._seqlen_k,
+            ctx.dropout_p,
+            ctx.softmax_scale,
+            ctx.causal,
+            (-1,-1),
+            None,
+            False,
+            rng_state=rng_state,
+        )
+        dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
+        dk = dk[..., : dout.shape[-1]]
+        dv = dv[..., : dout.shape[-1]]
+        dq, dk, dv = [rearrange(x, '(b s) ... -> b s ...', b=batch_size) for x in [dq, dk, dv]] 
+        dk = dk.contiguous()
+        dv = dv.contiguous()
+        dq = dq.contiguous()
+        if not last_idx:
+            k_grad_p, v_grad_p = ctx._kv_cache['k_grad'], ctx._kv_cache['v_grad']
+            dk += k_grad_p
+            dv += v_grad_p
+        ctx._kv_cache['k_grad'], ctx._kv_cache['v_grad'] = dk[:, :ctx._offset], dv[:, :ctx._offset]
+        dk = dk[:, ctx._offset:ctx._seqlen_k]
+        dv = dv[:, ctx._offset:ctx._seqlen_k] 
+            
+            
+        return dq, dk, dv, None, None, None, None, None, None, None
+
+
+
+
+        
+
 
 """ We use the following notation throughout this file:
      h: hidden size
@@ -111,6 +241,11 @@ class ParallelMLP(MegatronModule):
                 x = torch.chunk(x, 2, dim=-1)
                 return F.silu(x[0]) * x[1]
             self.activation_func = swiglu
+        elif args.gated_gelu:
+            def gategelu(x):
+                x = torch.chunk(x, 2, dim=-1)
+                return F.gelu(x[0]) * x[1]
+            self.activation_func = gategelu
         elif args.squared_relu:
             def squared_relu(x):
                 return torch.pow(F.relu(x), 2)
@@ -354,8 +489,9 @@ class FlashSelfAttention(torch.nn.Module):
         self.causal = causal
         self.softmax_scale = softmax_scale
         self.dropout_p = attention_dropout
+        self.kv_cache = {}
 
-    def forward(self, q, k, v):
+    def forward(self, q, k, v, micro_sp_idx):
         """Implements the multihead softmax attention.
         Arguments
         ---------
@@ -364,9 +500,18 @@ class FlashSelfAttention(torch.nn.Module):
 
         assert all((i.dtype in [torch.float16, torch.bfloat16] for i in (q,k,v)))
         assert all((i.is_cuda for i in (q,k,v)))
-
+        args = get_args()
         batch_size, seqlen_q = q.shape[0], q.shape[1]
         seqlen_k = k.shape[1]
+        if torch.is_tensor(micro_sp_idx):
+            micro_sp_idx = micro_sp_idx.item()
+        # micro_batch_id = args.schedule_info['micro_seq_id'] // args.pipe_sp_splits
+        if args.pipe_sp_splits != 1:
+            if micro_sp_idx == 0:
+                self.kv_cache = {}
+            output = kv_sp_flash_func(q, k, v, self.kv_cache, self.softmax_scale, True)
+            output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
+            return output.contiguous()
 
         q, k, v = [rearrange(x, 'b s ... -> (b s) ...') for x in [q, k, v]]
         cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32,
@@ -374,7 +519,6 @@ class FlashSelfAttention(torch.nn.Module):
 
         if self.training:
             # during training q,k,v always have same seqlen
-            assert seqlen_k == seqlen_q
 
             is_causal = self.causal
             cu_seqlens_k = cu_seqlens_q
@@ -507,15 +651,16 @@ class ParallelAttention(MegatronModule):
 
     def _checkpointed_attention_forward(self, query_layer, key_layer,
                                         value_layer, attention_mask,
-                                        rotary_pos_emb=None):
+                                        rotary_pos_emb=None, micro_sp_idx=None):
         """Forward method with activation checkpointing."""
         def custom_forward(*inputs):
             query_layer = inputs[0]
             key_layer = inputs[1]
             value_layer = inputs[2]
             attention_mask = inputs[3]
+            micro_sp_idx = inputs[4]
             output_ = self.core_attention(query_layer, key_layer,
-                                          value_layer, attention_mask)
+                                          value_layer, attention_mask, micro_sp_idx)
             return output_
 
         q_pos_emb, k_pos_emb = (None, None) if rotary_pos_emb is None \
@@ -539,7 +684,7 @@ class ParallelAttention(MegatronModule):
 
     def forward(self, hidden_states, attention_mask,
                 encoder_output=None, inference_params=None,
-                rotary_pos_emb=None):
+                rotary_pos_emb=None, micro_sp_idx=None):
         # hidden_states: [sq, b, h]
 
         # =================================================
@@ -596,6 +741,7 @@ class ParallelAttention(MegatronModule):
                 ],
                 dim=3)
             # [sq, b, ng, np/ng * hn] -> [sq, b, np, hn] -
+            query_layer = query_layer.contiguous()
             query_layer = query_layer.view(query_layer.size(0), query_layer.size(1), -1, self.hidden_size_per_attention_head)
         else:
             # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
@@ -683,15 +829,29 @@ class ParallelAttention(MegatronModule):
         )
 
         # apply relative positional encoding (rotary embedding)
+        args = get_args()
+        from megatron.core.pipeline_parallel.sp_utils import get_splits
         if rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = rotary_pos_emb
+            if args.pipe_sp_splits != 1:
+                if args.pipe_sp_strategy == "uniform_comp":
+                    splits = get_splits()
+                    start = sum(splits[:micro_sp_idx])
+                    end = sum(splits[:micro_sp_idx+1])
+                elif args.pipe_sp_strategy == "average":
+                    start = (micro_sp_idx * q_pos_emb.size(0)) // args.pipe_sp_splits
+                    end = ((micro_sp_idx + 1) * q_pos_emb.size(0)) // args.pipe_sp_splits
+                q_pos_emb = q_pos_emb[start:end]
+                k_pos_emb = k_pos_emb[start:end]
             query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb)
             key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb)
             # TODO, can apply positional embedding to value_layer so it has
             # absolute positional embedding.
             # otherwise, only relative positional embedding takes effect
             # value_layer = apply_rotary_pos_emb(value_layer, k_pos_emb)
-
+        args = get_args()
+        if args.pipe_sp_splits != 1:
+            assert args.use_flash_attn, "FlashAttention is required for microbatching in sequence"
         if not self.use_flash_attn:
             if self.checkpoint_core_attention:
                 context_layer = self._checkpointed_attention_forward(
@@ -704,9 +864,9 @@ class ParallelAttention(MegatronModule):
                        for x in (query_layer, key_layer, value_layer)]
             if not self.sequence_parallel:
                 with tensor_parallel.get_cuda_rng_tracker().fork():
-                    context_layer = self.core_attention_flash(q, k, v)
+                    context_layer = self.core_attention_flash(q, k, v, micro_sp_idx)
             else:
-                context_layer = self.core_attention_flash(q, k, v)
+                context_layer = self.core_attention_flash(q, k, v, micro_sp_idx)
             context_layer = rearrange(context_layer, 'b s h d -> s b (h d)').contiguous()
 
         # =================
@@ -1062,7 +1222,8 @@ class ParallelTransformerLayer(MegatronModule):
                 retriever_output=None,
                 retriever_attn_mask=None,
                 inference_params=None,
-                rotary_pos_emb=None):
+                rotary_pos_emb=None,
+                micro_sp_idx=None):
         # hidden_states: [s, b, h]
 
         # Layer norm at the beginning of the transformer layer.
@@ -1074,7 +1235,7 @@ class ParallelTransformerLayer(MegatronModule):
                 layernorm_output,
                 attention_mask,
                 inference_params=inference_params,
-                rotary_pos_emb=rotary_pos_emb)
+                rotary_pos_emb=rotary_pos_emb, micro_sp_idx=micro_sp_idx)
 
         # Residual connection.
         if self.apply_residual_connection_post_layernorm:
@@ -1510,7 +1671,7 @@ class ParallelTransformer(MegatronModule):
 
     def _checkpointed_forward(self, hidden_states, attention_mask,
                               encoder_output, enc_dec_attn_mask,
-                              rotary_pos_emb, is_first_microbatch):
+                              rotary_pos_emb, micro_sp_idx, is_first_microbatch):
         """Forward method with activation checkpointing."""
         def custom(start, end):
             def custom_forward(*args, **kwargs):
@@ -1542,12 +1703,13 @@ class ParallelTransformer(MegatronModule):
                         hidden_states, attention_mask, encoder_output,
                         enc_dec_attn_mask, **te_forward_kwargs)
                 else:
+                    micro_sp_idx = torch.tensor([micro_sp_idx], device='cuda', dtype=torch.int32)
                     hidden_states = tensor_parallel.checkpoint(
                         custom(l, l + self.recompute_num_layers),
                         self.distribute_saved_activations,
                         hidden_states, attention_mask,
                         encoder_output, enc_dec_attn_mask,
-                        None, None, None, None, rotary_pos_emb)
+                        None, None, None, None, rotary_pos_emb, micro_sp_idx)
 
                 l += self.recompute_num_layers
 
@@ -1603,7 +1765,8 @@ class ParallelTransformer(MegatronModule):
                 retriever_output=None,
                 retriever_attn_mask=None,
                 inference_params=None,
-                rotary_pos_emb=None):
+                rotary_pos_emb=None,
+                micro_sp_idx=None):
         # hidden_states: [s, b, h]
 
         # Checks.
@@ -1664,6 +1827,7 @@ class ParallelTransformer(MegatronModule):
                                                                encoder_output,
                                                                enc_dec_attn_mask,
                                                                rotary_pos_emb,
+                                                               micro_sp_idx,
                                                                is_first_microbatch)
                 else:
                     forward_kwargs = {
@@ -1682,6 +1846,7 @@ class ParallelTransformer(MegatronModule):
                         forward_kwargs['retriever_input'] = retriever_input
                         forward_kwargs['retriever_output'] = retriever_output
                         forward_kwargs['retriever_attn_mask'] = retriever_attn_mask
+                        forward_kwargs['micro_sp_idx'] = micro_sp_idx
 
                     for index in range(self.num_layers):
                         layer = self._get_layer(index)

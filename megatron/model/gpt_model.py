@@ -77,7 +77,7 @@ class GPTModel(MegatronModule):
                 retriever_input_ids=None,
                 retriever_position_ids=None,
                 retriever_attn_mask=None,
-                labels=None, tokentype_ids=None, inference_params=None):
+                labels=None, tokentype_ids=None, inference_params=None, micro_sp_idx=None):
 
         lm_output = self.language_model(
             input_ids,
@@ -86,7 +86,7 @@ class GPTModel(MegatronModule):
             retriever_input_ids=retriever_input_ids,
             retriever_position_ids=retriever_position_ids,
             retriever_attn_mask=retriever_attn_mask,
-            inference_params=inference_params)
+            inference_params=inference_params, micro_sp_idx=micro_sp_idx)
 
         if self.post_process:
             return post_language_model_processing(

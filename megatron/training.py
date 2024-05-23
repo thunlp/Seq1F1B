@@ -38,10 +38,11 @@ from megatron.utils import check_adlr_autoresume_termination
 from megatron.utils import unwrap_model
 from megatron.data.data_samplers import build_pretraining_data_loader
 from megatron.utils import calc_params_l2_norm
-from megatron.core.pipeline_parallel import get_forward_backward_func
+from megatron.core.pipeline_parallel import get_forward_backward_func, get_tflops
 from megatron.utils import report_memory
 from megatron.model.vision.knn_monitor import compute_feature_bank
-
+from collections import defaultdict
+train_utils_info = defaultdict(list)
 
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
@@ -49,6 +50,11 @@ def print_datetime(string):
     time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print_rank_0('[' + string + '] datetime: {} '.format(time_str))
 
+def get_mem():
+    mem = torch.cuda.max_memory_reserved() / 1024**3
+    res = [None for i in range(mpu.get_pipeline_model_parallel_world_size()) ]
+    torch.distributed.all_gather_object(res, mem, group=mpu.get_pipeline_model_parallel_group())
+    return res
 
 def pretrain(train_valid_test_dataset_provider,
              model_provider,
@@ -179,6 +185,21 @@ def pretrain(train_valid_test_dataset_provider,
                                    test_data_iterator, model,
                                    iteration, process_non_loss_data_func, config,
                                    verbose=True, write_to_tensorboard=not args.skip_train)
+    if torch.distributed.get_rank() == torch.distributed.get_world_size() - 1:
+        def avg_std(lis):
+            return sum(lis) / len(lis), torch.std(torch.tensor(lis)).item()
+        print("loss", train_utils_info['loss'])
+        if len(train_utils_info['time']) > 4:
+            mean_time, std_time =  avg_std(train_utils_info['time'][4:])
+            toks, std_toks = avg_std(train_utils_info['toks'][4:])
+            tflops, std_tflops = avg_std(train_utils_info['tflops'][4:])
+            print("time: ", f"{mean_time:.2f}±{std_time:.2f}")
+            print("toks: ", f"{toks:.2f}±{std_toks:.2f}")
+            print("tflops: ", f"{tflops:.2f}±{std_tflops:.2f}")
+            print("mem_arr: ", "{}".format(r"/".join(train_utils_info['mem_arr'][-1])))
+
+        else:
+            print("No enough iter to record time or tflops")
 
 
 def update_train_iters(args):
@@ -642,6 +663,19 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             elapsed_time_per_iteration * 1000.0)
         log_string += ' learning rate: {:.3E} |'.format(learning_rate)
         log_string += ' global batch size: {:5d} |'.format(batch_size)
+        toks = batch_size * args.seq_length / elapsed_time_per_iteration
+        mem = get_mem()
+        memn = list(map(str, mem))
+        memn = list(map(lambda x:x[:4], memn))
+        tflops_total = get_tflops()
+        tflops_s = 3 * args.global_batch_size * tflops_total / elapsed_time_per_iteration / torch.distributed.get_world_size() #including forward+backward , so it will multiply by 3
+        log_string += ' toks/s: {:.2f} |'.format(toks)
+        log_string += ' TFlops/s: {:.2f} |'.format(tflops_s)
+        log_string += ' mem_each_stage: {} |'.format(",".join(memn))
+        train_utils_info['toks'].append(toks)
+        train_utils_info['tflops'].append(tflops_s)
+        train_utils_info['time'].append(elapsed_time_per_iteration)
+        train_utils_info['mem_arr'].append(memn)
         for key in total_loss_dict:
             if key not in [advanced_iters_key, skipped_iters_key,
                            nan_iters_key]:
@@ -649,6 +683,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                       float(max(1, total_loss_dict[advanced_iters_key]))
                 if avg > 0.0:
                     log_string += ' {}: {:.6E} |'.format(key, avg)
+                    train_utils_info['loss'].append(avg)
                 total_loss_dict[key] = torch.cuda.FloatTensor([0.0])
         log_string += ' loss scale: {:.1f} |'.format(loss_scale)
         if grad_norm is not None:

@@ -147,9 +147,10 @@ def get_ltor_masks_and_position_ids(data,
         att_mask_batch = micro_batch_size
     else:
         att_mask_batch = 1
-    attention_mask = torch.tril(torch.ones(
-        (att_mask_batch, seq_length, seq_length), device=data.device)).view(
-            att_mask_batch, 1, seq_length, seq_length)
+    # long sequence will causal OOM here since mask is N^2 memory
+    # attention_mask = torch.tril(torch.ones(
+    #     (att_mask_batch, seq_length, seq_length), device=data.device)).view(
+    #         att_mask_batch, 1, seq_length, seq_length)
 
     # Loss mask.
     loss_mask = torch.ones(data.size(), dtype=torch.float, device=data.device)
@@ -187,7 +188,8 @@ def get_ltor_masks_and_position_ids(data,
                     prev_index = i + 1
 
     # Convert attention mask to binary:
-    attention_mask = (attention_mask < 0.5)
+    # attention_mask = (attention_mask < 0.5)
+    attention_mask = None
 
     return attention_mask, loss_mask, position_ids
 

@@ -6,3 +6,12 @@ build
 *~
 slurm*
 logs
+*.npy
+*.bin
+*.idx
+*.log
+*.op
+*nsys-rep
+*tfevents*
+*/index-cache/*
+*.pt
