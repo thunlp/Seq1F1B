@@ -1,0 +1,17 @@
+\begin{tabular}{llllllllll}
+\toprule
+ &  & \multicolumn{4}{r}{TFLOPS/s} & \multicolumn{4}{r}{Throughput} \\
+ & Method & 1F1B & 1F1B-I & Seq1F1B & Seq1F1B-I & 1F1B & 1F1B-I & Seq1F1B & Seq1F1B-I \\
+seqlen & Micros &  &  &  &  &  &  &  &  \\
+\midrule
+\multirow[t]{2}{*}{32768} & 8 & 99.67±0.19 & 109.55±0.72 & \textbf{110.62±0.54} & \textbf{97.69±1.82} & 48189.47±93.97 & 52964.06±348.28 & \textbf{53484.52±259.03} & \textbf{47232.00±882.04} \\
+ & 16 & 114.45±0.36 & 116.46±0.76 & \textbf{115.34±0.18} & \textbf{95.55±1.60} & 55333.16±175.13 & 56304.42±365.27 & \textbf{55765.31±89.28} & \textbf{46195.24±771.99} \\
+\cline{1-10}
+\multirow[t]{2}{*}{65536} & 8 & 107.49±0.03 & 119.96±0.16 & \textbf{124.62±0.06} & \textbf{117.75±1.26} & 37342.92±10.05 & 41676.97±57.03 & \textbf{43296.70±20.83} & \textbf{40907.87±437.09} \\
+ & 16 & 123.95±0.06 & 128.70±0.06 & \textbf{123.05±0.51} & \textbf{117.98±0.82} & 43063.26±20.15 & 44712.49±19.41 & \textbf{33367.34±137.63} & \textbf{40989.72±284.90} \\
+\cline{1-10}
+\multirow[t]{2}{*}{131072} & 8 & OOM & OOM & \textbf{136.72±0.05} & \textbf{135.06±0.17} & OOM & OOM & \textbf{30392.34±10.14} & \textbf{30023.38±38.29} \\
+ & 16 & OOM & OOM & \textbf{142.08±0.02} & \textbf{136.58±0.19} & OOM & OOM & \textbf{31584.02±4.38} & \textbf{30362.33±42.01} \\
+\cline{1-10}
+\bottomrule
+\end{tabular}

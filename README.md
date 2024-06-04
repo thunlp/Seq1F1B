@@ -73,7 +73,7 @@ Seq1F1B demonstrates significant improvements over existing methods:
 - **Performance**: Achieves smaller pipeline bubbles, resulting in faster training times.
 - **Scalability**: Supports large-scale training on modern GPU clusters.
 
-| ![mem.png](../picture/seq1f1b_memory.png) |
+| ![mem.png](./picture/seq1f1b_memory.png) |
 |:--:|
 | *Memory usage comparison between Seq1F1B and existing methods.* |
 
