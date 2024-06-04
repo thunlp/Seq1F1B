@@ -1,4 +1,3 @@
-### README for Seq1F1B Pipeline Parallelism
 
 # Seq1F1B: Efficient Pipeline Parallelism for Long Sequence Training
 
@@ -17,6 +16,12 @@ Seq1F1B supports efficient training of a 30B parameter LLM on sequences up to 64
 - **Smaller Pipeline Bubbles**: Efficient scheduling reduces idle time during pipeline stages.
 - **Scalable Training**: Capable of training LLMs with up to 30B parameters on sequences up to 64k using 64 NVIDIA A100 GPUs.
 - **Based on Megatron-LM**: Built upon the robust and widely-used Megatron-LM.
+
+
+
+| ![seq1f1b_original.png](./picture/seq1f1b_original.png) |
+|:--:|
+| *Seq1F1B timeline* |
 
 ## Installation
 
@@ -93,3 +98,10 @@ Seq1F1B builds upon the Megatron-LM framework. We thank the Megatron-LM developm
 ## Future Work
 
 We plan to release our code and further improvements to advance the training of LLMs on long sequences. Stay tuned for updates!
+
+<!-- ## Citation 
+If you use this codebase, or otherwise found our work valuable, please cite:
+
+```
+
+``` -->
