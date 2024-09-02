@@ -11,6 +11,7 @@ from megatron import core, get_args
 from megatron.core import parallel_state
 from megatron.core.enums import ModelType
 from megatron.core.pipeline_parallel import p2p_communication
+from megatron.core.pipeline_parallel import offload
 from megatron.core.utils import get_attr_wrapped_model, get_model_config, get_model_type
 
 # Types
@@ -498,6 +499,12 @@ def forward_backward_pipelining_with_interleaving(
         if not forward:
             model_chunk_id = num_model_chunks - model_chunk_id - 1
         return model_chunk_id
+    
+    def get_offload_key(microbatch_id,*,forward):
+        group_id= microbatch_id // (pipeline_parallel_size * num_model_chunks)
+        model_chunk_id = get_model_chunk_id(model_chunk_id,forward=forward)
+        microbatch_id_in_model_chunk= microbatch_id % pipeline_parallel_size
+        return group_id,model_chunk_id,microbatch_id_in_model_chunk
 
     def is_first_microbatch_for_model_chunk(microbatch_id: int) -> bool:
         """Check if an iteration is the first for a model chunk."""
@@ -548,17 +555,26 @@ def forward_backward_pipelining_with_interleaving(
             if len(input_tensors[model_chunk_id]) == len(output_tensors[model_chunk_id]):
                 input_tensors[model_chunk_id].append(None)
         input_tensor = input_tensors[model_chunk_id][-1]
-        output_tensor = forward_step(
-            forward_step_func,
-            data_iterator[model_chunk_id],
-            model[model_chunk_id],
-            num_microbatches*args.pipe_sp_splits,
-            input_tensor,
-            forward_data_store,
-            config,
-            collect_non_loss_data,
-            checkpoint_activations_microbatch,
-        )
+        
+        if input_tensor is not None:
+            input_tensor,input_backward_handle=offload.get_forward_tensor_and_backward_handle(input_tensor)
+            input_tensors[model_chunk_id][-1]=input_backward_handle
+        
+        with offload.record(get_offload_key(microbatch_id,forward=True)):
+            output_tensor = forward_step(
+                forward_step_func,
+                data_iterator[model_chunk_id],
+                model[model_chunk_id],
+                num_microbatches*args.pipe_sp_splits,
+                input_tensor,
+                forward_data_store,
+                config,
+                collect_non_loss_data,
+                checkpoint_activations_microbatch,
+            )
+            
+        output_tensor_data=output_tensor.data
+        output_tensor=offload.forward_empty_backward_indentity(output_tensor)
         output_tensors[model_chunk_id].append(output_tensor)
 
         # if forward-only, no need to save tensors for a backward pass
@@ -566,7 +582,7 @@ def forward_backward_pipelining_with_interleaving(
             input_tensors[model_chunk_id].pop()
             output_tensors[model_chunk_id].pop()
 
-        return output_tensor
+        return output_tensor_data
 
     def backward_step_helper(microbatch_id):
         """Helper method to run backward step with model split into chunks
