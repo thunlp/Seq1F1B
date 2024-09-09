@@ -1,5 +1,14 @@
 
+<div align="center">
+  
 # Seq1F1B: Efficient Pipeline Parallelism for Long Sequence Training
+
+<p align="center">
+  <a href="./README_ZH.md">中文</a> •
+  <a href="https://arxiv.org/abs/2406.03488">Paper</a>
+</p>
+
+</div>
 
 Welcome to the Seq1F1B repository! Seq1F1B is an efficient sequence-level 1F1B (one-forward-one-backward) pipeline scheduling method designed to enhance the distributed training of large language models (LLMs) on long sequences. This method builds upon the Megatron-LM framework and introduces novel strategies to optimize memory usage and reduce pipeline bubbles.
 
@@ -99,9 +108,13 @@ Seq1F1B builds upon the Megatron-LM framework. We thank the Megatron-LM developm
 
 We plan to release our code and further improvements to advance the training of LLMs on long sequences. Stay tuned for updates!
 
-<!-- ## Citation 
+## Citation 
 If you use this codebase, or otherwise found our work valuable, please cite:
-
+```bibtex
+@article{ao2024seq1f1b,
+  title={Seq1F1B: Efficient Sequence-Level Pipeline Parallelism for Large Language Model Training},
+  author={Ao, Sun and Zhao, Weilin and Han, Xu and Yang, Cheng and Liu, Zhiyuan and Shi, Chuan and Sun, Maosong},
+  journal={arXiv preprint arXiv:2406.03488},
+  year={2024}
+}
 ```
-
-``` -->
