@@ -189,10 +189,11 @@ def pretrain(train_valid_test_dataset_provider,
         def avg_std(lis):
             return sum(lis) / len(lis), torch.std(torch.tensor(lis)).item()
         print("loss", train_utils_info['loss'])
+        start=1
         if len(train_utils_info['time']) > 4:
-            mean_time, std_time =  avg_std(train_utils_info['time'][4:])
-            toks, std_toks = avg_std(train_utils_info['toks'][4:])
-            tflops, std_tflops = avg_std(train_utils_info['tflops'][4:])
+            mean_time, std_time =  avg_std(train_utils_info['time'][start:])
+            toks, std_toks = avg_std(train_utils_info['toks'][start:])
+            tflops, std_tflops = avg_std(train_utils_info['tflops'][start:])
             print("time: ", f"{mean_time:.2f}±{std_time:.2f}")
             print("toks: ", f"{toks:.2f}±{std_toks:.2f}")
             print("tflops: ", f"{tflops:.2f}±{std_tflops:.2f}")

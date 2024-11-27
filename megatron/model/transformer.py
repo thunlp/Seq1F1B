@@ -83,6 +83,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             seqlen_k,
             dropout_p,
             softmax_scale,
+            block_table=None,
             causal=causal,
             window_size=(-1, -1),
             alibi_slopes=None,
@@ -241,11 +242,11 @@ class ParallelMLP(MegatronModule):
                 x = torch.chunk(x, 2, dim=-1)
                 return F.silu(x[0]) * x[1]
             self.activation_func = swiglu
-        elif args.gated_gelu:
-            def gategelu(x):
-                x = torch.chunk(x, 2, dim=-1)
-                return F.gelu(x[0]) * x[1]
-            self.activation_func = gategelu
+        # elif args.gated_gelu:
+        #     def gategelu(x):
+        #         x = torch.chunk(x, 2, dim=-1)
+        #         return F.gelu(x[0]) * x[1]
+        #     self.activation_func = gategelu
         elif args.squared_relu:
             def squared_relu(x):
                 return torch.pow(F.relu(x), 2)
