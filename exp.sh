@@ -5,25 +5,30 @@
 # sp_splits=(1 4)
 # seq_lens=(8096 16384)
 # model_configs=('3.5b' '7b')
+export NCCL_IB_HCA=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_6,mlx5_7,mlx5_8
+export CUDA_DEVICE_MAX_CONNECTIONS=1
 DATETIME=$(date +'date_%y-%m-%d_time_%H-%M-%S')
-PP_SP_STRS=('average' 'uniform_comp')
-num_micros=(32)
-sp_splits=(4 1)
+PP_SP_STRS=('uniform_comp')
+num_micros=(16)
+sp_splits=(4)
+export DATA_PATH="/workspace/workspace/Megatron-LM/"
 # sp_splits=(1)
-seq_lens=(16384)
-model_configs=('7b')
-VPP_SIZES=(1 2)
-TP_SIZE=2
-PP_SIZE=4
+# export MASTER_ADDR=localhost
+# export MASTER_PORT=32768
+# export WORLD_SIZE=1
+seq_lens=(65536)
+model_configs=('30b')
+VPP_SIZES=(2 4)
+TP_SIZE=8
+PP_SIZE=8
+export PROFILE="true"
 # Distributed
 MICRO_BATCH=1
 # WORLD_SIZE=1
-WORLD_SIZE=1
-TRAIN_ITER=20
+TRAIN_ITER=10
 GPUS_PER_NODE=8
 NGPUS=$((WORLD_SIZE * GPUS_PER_NODE))
 # MASTER_ADDR=g4006
-MASTER_ADDR=localhost
 
 MASTER_PORT=12306
 export TP_SIZE PP_SIZE MICRO_BATCH WORLD_SIZE GPUS_PER_NODE MASTER_ADDR MASTER_PORT PP_SP_STR
@@ -69,7 +74,6 @@ declare -A model_config_map=(
 )
 
 # 设置变量
-
 # Debug 开关，设置为1以启用屏幕输出
 DEBUG=1
 EXP_OUTPUT_FILE="./exp_logs/exps/${DATETIME}_exp.log"
@@ -125,11 +129,17 @@ for VPP_SIZE in "${VPP_SIZES[@]}"; do
 
                         if [ "$DEBUG" -eq 1 ]; then
                             set -o pipefail
-                            ./run.sh 2>&1 | tee $logname
+                            cmd="bash ./run.sh 2>&1 | tee $logname"
                         else
-                            ./run.sh > $logname 2>&1
+                            cmd="bash ./run.sh > $logname 2>&1"
                         fi
 
+                        if [ "$PROFILE" = "true" ]; then
+
+                            cmd="nsys profile -s none -t nvtx,cuda  --force-overwrite true --capture-range=cudaProfilerApi --capture-range-end=stop -o ${WORLD_SIZE}gpus_${model_config}model_${SEQ_LENGTH}seqlen_${PP_SP}_splits_${VPP_SIZE}vpp.nsys-rep $cmd"
+                        fi
+                        echo $cmd
+                        $cmd
                         return_code=$?
 
                         if [ $return_code -ne 0 ]; then
@@ -139,12 +149,12 @@ for VPP_SIZE in "${VPP_SIZES[@]}"; do
                             echo "*********Output*********"
                             output=$(tail -n 4 $logname)
                             echo "$output"
-                            declare -A data
-                            while IFS=: read -r key value; do
-                                data["$key"]=$(echo $value | xargs)  # 使用 xargs 去除多余的空格
-                            done <<< "$output"
-
-                            echo "$MICRO_BATCH,$num_micro,$SEQ_LENGTH,$VPP_SIZE,$TP_SIZE,$PP_SIZE,$PP_SP,$model_config,$PP_SP_STR_RES,$DP_SIZE,${data[toks]},${data[mem_arr]},${data[time]},$NGPUS,${data[tflops]}" >> $EXP_OUTPUT_FILE
+                            # declare -A data
+                            # while IFS=: read -r key value; do
+                            #     data["$key"]=$(echo $value | xargs)  # 使用 xargs 去除多余的空格
+                            # done <<< "$output"
+                            #
+                            # echo "$MICRO_BATCH,$num_micro,$SEQ_LENGTH,$VPP_SIZE,$TP_SIZE,$PP_SIZE,$PP_SP,$model_config,$PP_SP_STR_RES,$DP_SIZE,${data[toks]},${data[mem_arr]},${data[time]},$NGPUS,${data[tflops]}" >> $EXP_OUTPUT_FILE
                         fi
                     done
                 done
