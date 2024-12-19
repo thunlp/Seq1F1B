@@ -32,6 +32,14 @@ Seq1F1B supports efficient training of a 30B parameter LLM on sequences up to 64
 |:--:|
 | *Seq1F1B timeline* |
 
+| ![seq1f1b_I.png](./picture/seq1f1b_I.png) |
+|:--:|
+| *Seq1F1B-I timeline* |
+
+| ![seq1f1b_zerobubble.png](./picture/seq1f1b_zerobubble.png) |
+|:--:|
+| *Seq1F1B-ZB timeline* |
+
 ## Installation
 
 To get started with Seq1F1B, follow these steps:
