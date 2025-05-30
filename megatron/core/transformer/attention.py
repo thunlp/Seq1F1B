@@ -6,8 +6,11 @@ from typing import Optional, Tuple, Union
 
 import torch
 from torch import Tensor
+from collections import defaultdict
+import inspect
 
 from megatron.core import parallel_state, tensor_parallel
+from megatron.training import get_args
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.common.embeddings.rope_utils import (
     apply_rotary_pos_emb,
@@ -22,6 +25,7 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from megatron.core.transformer.seq1f1b_attn import Seq1F1BAttn, SpanInfo
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.utils import deprecate_inference_params, divide
@@ -106,6 +110,7 @@ class Attention(MegatronModule, ABC):
         self.layer_number = layer_number
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type
+        self.kv_cache_pool = defaultdict(dict)
 
         # For normal attention without groups, num_query_groups == num_attention_heads,
         # so these two will be the same
@@ -619,8 +624,12 @@ class Attention(MegatronModule, ABC):
         # ==================================
         # core attention computation
         # ==================================
-
+        # def hook_func(layer, input, kwargs, output):
+        #     if torch.distributed.get_rank() == 0:
+        #         from IPython import embed;embed()
+        # self.core_attention.register_forward_hook(hook_func, with_kwargs=True)
         if self.checkpoint_core_attention and self.training:
+            assert False, "no checkpointing"
             core_attn_out = self._checkpointed_attention_forward(
                 query,
                 key,
@@ -633,15 +642,37 @@ class Attention(MegatronModule, ABC):
         else:
             if inference_context is None or inference_context.is_static_batching():
                 # Static batching attention kernel.
-                core_attn_out = self.core_attention(
-                    query,
-                    key,
-                    value,
-                    attention_mask,
-                    attn_mask_type=attn_mask_type,
-                    attention_bias=attention_bias,
-                    packed_seq_params=packed_seq_params,
-                )
+                args = get_args()
+                if args.seq1f1b_splits > 1:
+                    batch_seq_info = args.batch_seq_info
+                    span_info = SpanInfo(
+                        batch_seq_info.span_idx_in_micro,
+                        args.seq1f1b_splits,
+                        self.kv_cache_pool[batch_seq_info.micro_batch_idx],
+                        0
+                    )
+                    signature = inspect.signature(self.core_attention.forward)
+                    bound_args = signature.bind(
+                        query,
+                        key,
+                        value,
+                        attention_mask,
+                        attn_mask_type=attn_mask_type,
+                        attention_bias=attention_bias,
+                        packed_seq_params=packed_seq_params,
+                    )
+                    args = bound_args.args
+                    core_attn_out = Seq1F1BAttn.apply(self.core_attention, span_info, *args)
+                else:
+                    core_attn_out = self.core_attention(
+                        query,
+                        key,
+                        value,
+                        attention_mask,
+                        attn_mask_type=attn_mask_type,
+                        attention_bias=attention_bias,
+                        packed_seq_params=packed_seq_params,
+                    )
 
             else:
                 # Dynamic batching attention kernel.

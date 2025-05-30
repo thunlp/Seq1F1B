@@ -1041,6 +1041,7 @@ def core_transformer_config_from_args(args, config_class=None):
         kw_args['cp_comm_type'] = args.cp_comm_type[0]
     if args.is_hybrid_model:
         kw_args['is_hybrid_model'] = args.is_hybrid_model
+    kw_args['seq1f1b_splits'] = args.seq1f1b_splits
 
     # Return config.
     return config_class(**kw_args)
@@ -2039,6 +2040,12 @@ def _add_distributed_args(parser):
                        help='Degree of tensor model parallelism for the encoder.')
     group.add_argument('--pipeline-model-parallel-size', type=int, default=1,
                        help='Degree of pipeline model parallelism.')
+    group.add_argument('--seq1f1b-splits', type=int, default=1,
+                       help='num of splits in seq1f1b, if set to 1, then use 1f1b')
+    group.add_argument('--seq1f1b-balance-method', type=str,
+        default='uniform_comp', choices=['average', 'uniform_comp'],
+        help='method to balance sequence and first-then-first-batch',
+    )
     group.add_argument('--encoder-pipeline-model-parallel-size', type=int, default=0,
                        help=('Degree of pipeline model parallelism in the encoder. This is '
                              'independent of the amount of pipeline in the decoder.'))

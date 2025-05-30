@@ -485,7 +485,8 @@ def get_batch_on_this_tp_rank(data_iterator):
            'attention_mask': None if "attention_mask" not in data else data["attention_mask"].cuda(non_blocking = True),
            'position_ids': data["position_ids"].cuda(non_blocking = True)
        }
-
+       if args.seq1f1b_splits > 1:
+           assert batch['attention_mask'] is None, "attention_mask must be None if you want to use seq1f1b"
        if args.pipeline_model_parallel_size == 1:
            _broadcast(batch['tokens'])
            _broadcast(batch['labels'])

@@ -43,6 +43,9 @@ class TransformerConfig(ModelParallelConfig):
     """Number of transformer layers on last pipeline stage.
     None implies equal layer division across PP ranks."""
 
+    seq1f1b_splits: Optional[int] = None
+    """Number of seq1f1b splits"""
+
     account_for_embedding_in_pipeline_split: bool = False
     """If set, the embedding layer will be treated as a standard transformer
     layer in the context of partition and placement for pipeline parallelism."""

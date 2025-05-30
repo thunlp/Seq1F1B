@@ -147,6 +147,13 @@ def _batched_p2p_ops(
             torch.distributed.irecv, tensor_recv_next, next_pipeline_rank, group
         )
         ops.append(recv_next_op)
+
+    def pairwise_swap(lst):
+        return [lst[i + 1] if i % 2 == 0 else lst[i - 1] for i in range(len(lst))]
+
+    if get_pipeline_model_parallel_rank() % 2 == 1 and len(ops) % 2 == 0:
+        ops = pairwise_swap(ops)
+
     if len(ops) > 0:
         reqs = torch.distributed.batch_isend_irecv(ops)
     else:
@@ -371,7 +378,13 @@ def _communicate(
             tensor_recv_next_list.append(tensor_recv_next)
         else:
             tensor_recv_next = None
-
+        # print(f"""
+        #     rank : {torch.distributed.get_rank()}
+        # tensor_send_prev_shape={tensor_send_prev.shape if tensor_send_prev is not None else "None"},
+        # tensor_recv_prev_shape={tensor_recv_prev.shape if tensor_recv_prev is not None else "None"},
+        # tensor_send_next_shape={tensor_send_next.shape if tensor_send_next is not None else "None"},
+        # tensor_recv_next_shape={tensor_recv_next.shape if tensor_recv_next is not None else "None"},
+        # """)
         p2p_reqs = p2p_func(
             tensor_send_prev=tensor_send_prev,
             tensor_recv_prev=tensor_recv_prev,

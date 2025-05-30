@@ -39,6 +39,8 @@ from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_mtp_block_spec,
 )
 from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
+from megatron.core.pipeline_parallel.sequence_split import get_splits
+from megatron.core.pipeline_parallel.seq_utils import Seq1F1BInfo
 
 
 stimer = StragglerDetector()
@@ -134,6 +136,78 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
 
     return model
 
+def _get_batch_seq1f1b():
+
+    offset = -1
+    global_data = None
+    count = 0
+    def get_data(*args, **kwargs):
+        pipe_sp = get_args().seq1f1b_splits
+        nonlocal global_data, offset
+        nonlocal count
+        if offset == -1 or offset+1 == pipe_sp:
+            global_data = get_batch(*args,**kwargs)
+            # torch.save(global_data, f"./cache/data/global_data_{count}.pt")
+            count += 1
+
+        offset = (offset+1) % pipe_sp 
+        tokens, labels, loss_mask, attention_mask, position_ids = global_data
+            
+        global_args = get_args()
+        seq_length = global_args.seq_length
+        global_args.seq1f1b_balance_method = "average" if global_args.seq1f1b_splits == 1 else global_args.seq1f1b_balance_method
+        if global_args.seq1f1b_balance_method == "uniform_comp":
+            l_s = 0
+            for idx,split in enumerate(get_splits()):
+
+                if mpu.is_pipeline_last_stage():
+                    _labels = labels[:, l_s:l_s+split]
+                    _loss_mask = loss_mask
+                    _loss_mask._start = l_s
+                    _loss_mask._end = l_s+split
+                else:
+                    _labels = None
+                    _loss_mask = None
+
+                if mpu.is_pipeline_first_stage():
+                    _position_ids = position_ids[:, l_s : l_s + split]
+                    _tokens = tokens[:, l_s:l_s+split]
+                else:
+                    _position_ids = None
+                    _tokens = None
+
+                seq_info = Seq1F1BInfo(count, offset, l_s, l_s + split)
+                assert attention_mask is None
+                local_data = (_tokens, _labels, _loss_mask, attention_mask, _position_ids, seq_info)
+                l_s += split
+                if idx == offset:
+                    break
+
+        elif global_args.seq1f1b_balance_method == "average":
+            start = seq_length // pipe_sp * offset
+            end = seq_length // pipe_sp * (offset+1)
+            if mpu.is_pipeline_last_stage():
+                labels = labels.chunk(pipe_sp, dim=1)[offset]
+                loss_mask._start = start
+                loss_mask._end = end
+            else:
+                labels = None
+                loss_mask = None
+
+            if mpu.is_pipeline_first_stage():
+                tokens = tokens.chunk(pipe_sp, dim=1)[offset]
+                position_ids = position_ids.chunk(pipe_sp, dim=1)[offset]
+            else:
+                position_ids = None
+                tokens = None
+            seq_info = Seq1F1BInfo(count, offset, start, end)
+            local_data = (tokens, labels, loss_mask, attention_mask, position_ids, seq_info)
+
+        return local_data
+
+    return get_data
+
+get_batch_seq1f1b = _get_batch_seq1f1b()
 
 def get_batch(data_iterator):
     """Generate a batch."""
@@ -171,9 +245,19 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
     args = get_args()
 
     losses = output_tensor.float()
-    loss_mask = loss_mask.view(-1).float()
-    total_tokens = loss_mask.sum()
-    loss = torch.cat([torch.sum(losses.view(-1) * loss_mask).view(1), total_tokens.view(1)])
+    if args.seq1f1b_splits > 1:
+        start = loss_mask._start
+        end = loss_mask._end
+        loss_mask_p = loss_mask[:, start:end]
+        loss_mask = loss_mask.contiguous()
+        loss_mask = loss_mask.view(-1).float()
+        loss_mask_p = loss_mask_p.contiguous().view(-1).float()
+        total_tokens = loss_mask_p.sum()
+        loss = torch.cat([torch.sum(losses.view(-1) * loss_mask_p).view(1), total_tokens.view(1)])
+    else:
+        loss_mask = loss_mask.view(-1).float()
+        total_tokens = loss_mask.sum()
+        loss = torch.cat([torch.sum(losses.view(-1) * loss_mask).view(1), total_tokens.view(1)])
 
     if args.context_parallel_size > 1:
         torch.distributed.all_reduce(loss, group=mpu.get_context_parallel_group())
@@ -237,17 +321,27 @@ def forward_step(data_iterator, model: GPTModel):
     timers('batch-generator', log_level=2).start()
     global stimer
     with stimer(bdata=True):
-        tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
-            data_iterator)
+        if args.seq1f1b_splits > 1:
+            tokens, labels, loss_mask, attention_mask, position_ids, batch_seq_info = get_batch_seq1f1b(
+                data_iterator)
+        else:
+            tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
+                data_iterator)
+            batch_seq_info = None
     timers('batch-generator').stop()
-
+    args.batch_seq_info = batch_seq_info
     with stimer:
         if args.use_legacy_models:
             output_tensor = model(tokens, position_ids, attention_mask,
                                 labels=labels)
         else:
-            output_tensor = model(tokens, position_ids, attention_mask,
-                                labels=labels, loss_mask=loss_mask)
+            output_tensor = model(
+                tokens,
+                position_ids,
+                attention_mask,
+                labels=labels,
+                loss_mask=loss_mask,
+            )
 
     return output_tensor, partial(loss_func, loss_mask)
 
