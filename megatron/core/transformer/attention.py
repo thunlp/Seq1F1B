@@ -11,6 +11,7 @@ import inspect
 
 from megatron.core import parallel_state, tensor_parallel
 from megatron.training import get_args
+from megatron.training import get_split_solver
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.common.embeddings.rope_utils import (
     apply_rotary_pos_emb,
@@ -643,7 +644,12 @@ class Attention(MegatronModule, ABC):
             if inference_context is None or inference_context.is_static_batching():
                 # Static batching attention kernel.
                 args = get_args()
-                if args.seq1f1b_splits > 1:
+                solver = get_split_solver()
+                # if solver.fitted:
+                #     if torch.distributed.get_rank() == 0:
+                #         from IPython import embed;embed()
+                #     torch.distributed.barrier()
+                if args.seq1f1b_splits > 1 and solver.fitted:
                     batch_seq_info = args.batch_seq_info
                     span_info = SpanInfo(
                         batch_seq_info.span_idx_in_micro,

@@ -2043,8 +2043,28 @@ def _add_distributed_args(parser):
     group.add_argument('--seq1f1b-splits', type=int, default=1,
                        help='num of splits in seq1f1b, if set to 1, then use 1f1b')
     group.add_argument('--seq1f1b-balance-method', type=str,
-        default='uniform_comp', choices=['average', 'uniform_comp'],
+        default='uniform_comp', choices=['average', 'uniform_comp', 'linear_fit', 'fix'],
         help='method to balance sequence and first-then-first-batch',
+    )
+    group.add_argument('--seq1f1b-fix-splits', type=str,
+        default=None,
+        help='fix splits for seq1f1b',
+    )
+    group.add_argument('--seq1f1b-linear-fitting-step', type=int,
+        default=0,
+        help='Warm up step for linear_fit balance method',
+    )
+    group.add_argument('--seq1f1b-linear-runtime-fitting-steps', type=int,
+        default=0,
+        help='Simple Runtime fitting based on timers',
+    )
+    group.add_argument('--seq1f1b-linear-params', type=str,
+        default=None,
+        help='Use existing fitted params to splits',
+    )
+    group.add_argument('--seq1f1b-linear-warmup-step', type=int,
+        default=0,
+        help='Warm up step for linear_fit balance method',
     )
     group.add_argument('--encoder-pipeline-model-parallel-size', type=int, default=0,
                        help=('Degree of pipeline model parallelism in the encoder. This is '

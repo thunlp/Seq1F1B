@@ -9,6 +9,7 @@ class SeqTFlops:
     num_heads: int
     dim_head: int
     vocab_size: int
+    causal: bool
 
     def get_ffn_tflops(self, seqlen):
         ffn_tflops = 4 * seqlen * self.hidden_size * self.ffn_size
@@ -19,8 +20,8 @@ class SeqTFlops:
         embed_proj_tflops = 2 * seqlen * self.hidden_size * self.vocab_size
         return embed_tflops, embed_proj_tflops
 
-    def get_seq_tflops(self, seqlen, causal=False):
-        scale = 0.5 if causal else 1
+    def get_seq_tflops(self, seqlen):
+        scale = 0.5 if self.causal else 1
         config = self
         hidden_size = config.hidden_size
         num_heads = config.num_heads
@@ -51,9 +52,11 @@ class SeqTFlops:
             - seqlen**2 * (4 * self.dim_head + 3) * self.num_heads / 2
         )
         ffn_tflops = self.get_ffn_tflops(seqlen)
-        embed_tflops, emb_proj_tflops = self.get_emb_tflops(seqlen)
-        tf = embed_tflops + self.num_layers * (attn_part + ffn_tflops) + emb_proj_tflops
+        # embed_tflops, emb_proj_tflops = self.get_emb_tflops(seqlen)
+        # tf = embed_tflops + self.num_layers * (attn_part + ffn_tflops) + emb_proj_tflops
+        tf = self.num_layers * (attn_part + ffn_tflops)
         return tf / 10**12
+
 @dataclass
 class Seq1F1BInfo:
     '''

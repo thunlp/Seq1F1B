@@ -102,6 +102,7 @@ from .global_vars import (
     destroy_global_vars,
     get_args,
     get_signal_handler,
+    get_split_solver,
     get_timers,
     get_tensorboard_writer,
     get_wandb_writer,
@@ -113,6 +114,67 @@ from . import ft_integration
 
 stimer = StragglerDetector()
 
+def fit_solver(iteration):
+    solver = get_split_solver()
+    args = get_args()
+    timers = get_timers()
+    pp_ranks = torch.distributed.get_process_group_ranks(
+        mpu.get_pipeline_model_parallel_group()
+    )
+    # Allgather first and last pipeline ranks across all nodes
+    global_pp_first_last_ranks = [torch.tensor([0, 0], dtype=torch.int, device='cuda') for _ in range(torch.distributed.get_world_size())]
+    torch.distributed.all_gather(global_pp_first_last_ranks, torch.tensor([pp_ranks[0], pp_ranks[-1]], dtype=torch.int, device='cuda'))
+    pp_first_last_ranks = [i.flatten().cpu().numpy().tolist() for i in global_pp_first_last_ranks]
+    pp_first_last_ranks = [j for i in pp_first_last_ranks for j in i]
+    pp_first_last_ranks = set(pp_first_last_ranks)
+
+    if args.seq1f1b_balance_method == "linear_fit" and iteration > args.seq1f1b_linear_warmup_step + 1:
+        print_rank_0(f"training_log : {iteration}")
+        if iteration <= args.seq1f1b_linear_warmup_step + args.seq1f1b_linear_fitting_step:
+            forward_time = (
+                timers._get_elapsed_time_all_ranks(
+                    ["forward-compute"], reset=False, barrier=False
+                ) .cpu() .numpy() .tolist()
+            )
+            mean_time = []
+            print_rank_0(f"forward-time-across-devices: {forward_time}")
+            for idx, f_t in enumerate(forward_time):
+                if idx not in pp_first_last_ranks: 
+                    mean_time.append(f_t[0])
+            print_rank_0(f"remove-first-last-forward-time: {mean_time}")
+            cost = sum(mean_time) / len(mean_time)
+            print_rank_0(f"mean time: {cost}")
+            fitting_length = min(
+                (iteration - args.seq1f1b_linear_warmup_step)
+                * args.seq_length
+                // args.seq1f1b_linear_fitting_step,
+                args.seq_length,
+            )
+            fitting_length = fitting_length // args.tensor_model_parallel_size * args.tensor_model_parallel_size 
+            solver.add_cost(fitting_length, fitting_length, cost  / args.seq1f1b_splits)
+            print_rank_0(f"fitting length : {fitting_length}")
+            print_rank_0(f"cost: {cost / args.seq1f1b_splits}")
+        elif iteration < args.seq1f1b_linear_warmup_step + args.seq1f1b_linear_fitting_step + args.seq1f1b_linear_runtime_fitting_steps:
+            costs = []
+            for span in range(args.seq1f1b_splits):
+                forward_time = (
+                    timers._get_elapsed_time_all_ranks(
+                        [f"forward-span-{span}"], reset=False, barrier=False
+                    ) .cpu() .numpy() .tolist()
+                )
+                mean_time = []
+                for idx, f_t in enumerate(forward_time):
+                    if idx not in pp_first_last_ranks: 
+                        mean_time.append(f_t[0])
+                cost = sum(mean_time) / len(mean_time)
+                costs.append(cost)
+            solver.fit_span_cost(costs)
+            print_rank_0(f"fit_span_cost splits : {solver.get_splits()}")
+            
+        if iteration == args.seq1f1b_linear_warmup_step + args.seq1f1b_linear_fitting_step:
+            solver.fit()
+            print_rank_0(f"fitting params : \n\t alpha1: {solver.alpha1}\n\t alpha2: {solver.alpha2} \n\t beta {solver.beta}")
+            print_rank_last(f"After fitting, the splits is: {solver.get_splits()}")
 
 def destroy_global_state():
     destroy_global_vars()
@@ -1238,6 +1300,7 @@ def train_step(forward_step_func, data_iterator,
 
         # Forward pass.
         forward_backward_func = get_forward_backward_func()
+        solver = get_split_solver()
         losses_reduced = forward_backward_func(
             forward_step_func=forward_step_func,
             data_iterator=data_iterator,
@@ -1246,7 +1309,9 @@ def train_step(forward_step_func, data_iterator,
             seq_length=args.seq_length,
             micro_batch_size=args.micro_batch_size,
             decoder_seq_length=args.decoder_seq_length,
-            forward_only=False)
+            forward_only=False,
+            seq1f1b_splits=args.seq1f1b_splits if solver.fitted else 1,
+        )
     should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
     if should_exit:
         return {}, True, should_checkpoint, should_exit, exit_code, None, None
@@ -1366,6 +1431,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
         'forward-backward',
         'forward-compute',
         'backward-compute',
+        'post-process',
+        'loss-func',
         'batch-generator',
         'forward-recv',
         'forward-send',
@@ -1387,6 +1454,17 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
         'optimizer-inner-step',
         'optimizer-copy-main-to-model-params',
         'optimizer']
+
+
+    timers_to_log = [
+        "forward-compute",
+        "backward-compute",
+    ]
+    for span in range(args.seq1f1b_splits):
+        timers_to_log.append(f"forward-span-{span}")
+
+    fit_solver(iteration)
+
 
     # Calculate batch size.
     batch_size = args.micro_batch_size * args.data_parallel_size * \

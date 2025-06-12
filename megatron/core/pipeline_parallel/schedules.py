@@ -683,6 +683,7 @@ def forward_backward_pipelining_with_interleaving(
     forward_only: bool = False,
     collect_non_loss_data: bool = False,
     first_val_step: bool = None,
+    seq1f1b_splits: int = 1,
 ):
     """Run interleaved 1F1B schedule (model split into model chunks), with
     communication between pipeline stages as needed.
@@ -761,23 +762,24 @@ def forward_backward_pipelining_with_interleaving(
 
     # Model chunk IDs with synchronized grads
     synchronized_model_chunks = set()
-    if config.seq1f1b_splits == 1:
+    if config.seq1f1b_splits > 1:
+        config.variable_seq_lengths = True
+    if seq1f1b_splits == 1:
         input_tensors = [[] for _ in range(len(model))]
         output_tensors = [[] for _ in range(len(model))]
     else:
         # assert config.variable_seq_lengths, "seq1f1b needs variable_seq_lengths"
-        config.variable_seq_lengths = True
-        input_tensors = [sequence_1f1b_queue(config.seq1f1b_splits, print=False, chunk=i, add_msg="input") for i in range(len(model))]
-        output_tensors = [sequence_1f1b_queue(config.seq1f1b_splits, print=False, chunk=i, add_msg="output") for i in range(len(model))]
+        input_tensors = [sequence_1f1b_queue(seq1f1b_splits, print=False, chunk=i, add_msg="input") for i in range(len(model))]
+        output_tensors = [sequence_1f1b_queue(seq1f1b_splits, print=False, chunk=i, add_msg="output") for i in range(len(model))]
     total_num_tokens = torch.tensor(0, dtype=torch.int).cuda()
 
     forward_data_store = []
     output_tensor_grads = None
     if not forward_only:
-        if config.seq1f1b_splits == 1:
+        if seq1f1b_splits == 1:
             output_tensor_grads = [[] for _ in range(len(model))]
         else:
-            output_tensor_grads = [sequence_1f1b_queue(config.seq1f1b_splits) for _ in range(len(model))]
+            output_tensor_grads = [sequence_1f1b_queue(seq1f1b_splits) for _ in range(len(model))]
     else:
         output_tensor_grads = None
 
@@ -839,7 +841,7 @@ def forward_backward_pipelining_with_interleaving(
         num_warmup_microbatches,
         num_microbatches_remaining,
     ) = get_pp_rank_microbatches(
-        num_microbatches, num_model_chunks, config.microbatch_group_size_per_vp_stage, forward_only, config.seq1f1b_splits
+        num_microbatches, num_model_chunks, config.microbatch_group_size_per_vp_stage, forward_only, seq1f1b_splits
     )
     if torch.distributed.get_rank() == 0:
         print(f"total micro: {total_num_microbatches}, "
@@ -872,7 +874,7 @@ def forward_backward_pipelining_with_interleaving(
     # virtual_microbatch_id | 0 1 2 3 4 5 6 7 8 9
     # microbatch_id         | 0 1 2 0 1 2 3 4 3 4
     # model_chunk_id        | 0 0 0 1 1 1 0 0 1 1
-    num_microbatches = num_microbatches * config.seq1f1b_splits
+    num_microbatches = num_microbatches * seq1f1b_splits
     schedule_table = get_schedule_table(
         num_microbatches, len(model), config.microbatch_group_size_per_vp_stage 
     )
@@ -1015,7 +1017,7 @@ def forward_backward_pipelining_with_interleaving(
         # This input buffering is needed to overlap the computation with the receipt of
         # the next inputs. To index the proper buffered inputs for forword_step, we use
         # microbatch_id offset with number of released microbatches that have completed backprop.
-        if config.seq1f1b_splits > 1:
+        if seq1f1b_splits > 1:
             assert (
                 config.microbatch_group_size_per_vp_stage
                 == parallel_state.get_pipeline_model_parallel_world_size()
@@ -1756,6 +1758,7 @@ def forward_backward_pipelining_without_interleaving(
     forward_only: bool = False,
     collect_non_loss_data: bool = False,
     first_val_step: bool = None,
+    seq1f1b_splits: int = 1, 
 ):
     """Run non-interleaved 1F1B schedule, with communication between pipeline
     stages. Returns dictionary with losses if the last stage, empty dict otherwise."""
@@ -1810,10 +1813,10 @@ def forward_backward_pipelining_without_interleaving(
     num_warmup_microbatches = (
         parallel_state.get_pipeline_model_parallel_world_size()
         - parallel_state.get_pipeline_model_parallel_rank()
-        + config.seq1f1b_splits
+        + seq1f1b_splits
         - 2
     )
-    num_microbatches *= config.seq1f1b_splits
+    num_microbatches *= seq1f1b_splits
     num_warmup_microbatches = min(num_warmup_microbatches, num_microbatches)
     num_microbatches_remaining = num_microbatches - num_warmup_microbatches
 
@@ -1856,13 +1859,15 @@ def forward_backward_pipelining_without_interleaving(
     input_tensors = None
     output_tensors = None
     total_num_tokens = torch.tensor(0, dtype=torch.int).cuda()
+    if config.seq1f1b_splits > 1:
+        config.variable_seq_lengths = True
+        config.batch_p2p_comm = False
+        config.variable_seq_lengths = True
 
     if not forward_only:
-        if config.seq1f1b_splits > 1:
-            config.variable_seq_lengths = True
-            config.batch_p2p_comm = False
-            input_tensors = sequence_1f1b_queue(config.seq1f1b_splits, print=False, add_msg="input") 
-            output_tensors = sequence_1f1b_queue(config.seq1f1b_splits, print=False, add_msg="output")
+        if seq1f1b_splits > 1:
+            input_tensors = sequence_1f1b_queue(seq1f1b_splits, print=False, add_msg="input") 
+            output_tensors = sequence_1f1b_queue(seq1f1b_splits, print=False, add_msg="output")
         else:
             input_tensors = []
             output_tensors = []

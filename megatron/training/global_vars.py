@@ -10,6 +10,7 @@ from megatron.core import Timers
 from megatron.core.num_microbatches_calculator import init_num_microbatches_calculator, unset_num_microbatches_calculator
 from megatron.training import dist_signal_handler
 from megatron.training.tokenizer import build_tokenizer
+from megatron.core.pipeline_parallel.sequence_split import SplitSolver
 
 _GLOBAL_ARGS = None
 _GLOBAL_TOKENIZER = None
@@ -19,12 +20,17 @@ _GLOBAL_ONE_LOGGER = None
 _GLOBAL_ADLR_AUTORESUME = None
 _GLOBAL_TIMERS = None
 _GLOBAL_SIGNAL_HANDLER = None
+_GLOBAL_SEQUENCE_SOLVER = None
 
 def get_args():
     """Return arguments."""
     _ensure_var_is_initialized(_GLOBAL_ARGS, 'args')
     return _GLOBAL_ARGS
 
+def get_split_solver():
+    """Return arguments."""
+    _ensure_var_is_initialized(_GLOBAL_SEQUENCE_SOLVER, 'split-solver')
+    return _GLOBAL_SEQUENCE_SOLVER
 
 def get_tokenizer():
     """Return tokenizer."""
@@ -96,6 +102,7 @@ def set_global_variables(args, build_tokenizer=True):
     _set_one_logger(args)
     _set_adlr_autoresume(args)
     _set_timers(args)
+    _set_split_solver(args)
 
     if args.exit_signal_handler:
         _set_signal_handler()
@@ -148,6 +155,10 @@ def rebuild_tokenizer(args):
     _GLOBAL_TOKENIZER = None
     return _build_tokenizer(args)
 
+def _set_split_solver(args):
+    global _GLOBAL_SEQUENCE_SOLVER
+    _GLOBAL_SEQUENCE_SOLVER = SplitSolver(args.seq_length, args)
+    return _GLOBAL_SEQUENCE_SOLVER
 
 def _set_tensorboard_writer(args):
     """Set tensorboard writer."""

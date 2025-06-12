@@ -8,6 +8,7 @@ import inspect
 
 from typing import List, Optional, Tuple, Union
 from megatron.training import get_args
+from megatron.training import get_split_solver
 from megatron.training import print_rank_0
 from megatron.training import get_timers
 from megatron.training import get_tokenizer
@@ -39,7 +40,6 @@ from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_mtp_block_spec,
 )
 from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
-from megatron.core.pipeline_parallel.sequence_split import get_splits
 from megatron.core.pipeline_parallel.seq_utils import Seq1F1BInfo
 
 
@@ -136,54 +136,79 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
 
     return model
 
-def _get_batch_seq1f1b():
+def _get_slice_data(tokens, labels, loss_mask, position_ids, start, end):
+    if mpu.is_pipeline_last_stage():
+        labels = labels[:, start:end]
+        loss_mask = loss_mask
+        loss_mask._start = start
+        loss_mask._end = end
+    else:
+        labels = None
+        loss_mask = None
 
+    if mpu.is_pipeline_first_stage():
+        position_ids = position_ids[:, start:end]
+        tokens = tokens[:, start:end]
+    else:
+        position_ids = None
+        tokens = None
+    return tokens, labels, loss_mask, position_ids
+
+def _get_batch_seq1f1b():
     offset = -1
     global_data = None
     count = 0
-    def get_data(*args, **kwargs):
-        pipe_sp = get_args().seq1f1b_splits
+
+    def get_data(*_args, **_kwargs):
+        args = get_args()
+        solver = get_split_solver()
+        pipe_sp = args.seq1f1b_splits
         nonlocal global_data, offset
         nonlocal count
         if offset == -1 or offset+1 == pipe_sp:
-            global_data = get_batch(*args,**kwargs)
-            # torch.save(global_data, f"./cache/data/global_data_{count}.pt")
+            global_data = get_batch(*_args,**_kwargs)
             count += 1
 
         offset = (offset+1) % pipe_sp 
         tokens, labels, loss_mask, attention_mask, position_ids = global_data
             
-        global_args = get_args()
-        seq_length = global_args.seq_length
-        global_args.seq1f1b_balance_method = "average" if global_args.seq1f1b_splits == 1 else global_args.seq1f1b_balance_method
-        if global_args.seq1f1b_balance_method == "uniform_comp":
-            l_s = 0
-            for idx,split in enumerate(get_splits()):
-
-                if mpu.is_pipeline_last_stage():
-                    _labels = labels[:, l_s:l_s+split]
-                    _loss_mask = loss_mask
-                    _loss_mask._start = l_s
-                    _loss_mask._end = l_s+split
+        seq_length = args.seq_length
+        args.seq1f1b_balance_method = "average" if args.seq1f1b_splits == 1 else args.seq1f1b_balance_method
+        if args.seq1f1b_balance_method in ["uniform_comp", "linear_fit", "fix"]:
+            if args.seq1f1b_balance_method == "linear_fit" and not solver.fitted:
+                if args.curr_iteration < args.seq1f1b_linear_warmup_step:
+                    fit_length = seq_length
                 else:
-                    _labels = None
-                    _loss_mask = None
+                    fit_length = min(
+                        (args.curr_iteration + 1 - args.seq1f1b_linear_warmup_step)
+                        * seq_length
+                        // args.seq1f1b_linear_fitting_step,
+                        seq_length,
+                    )
+                    fit_length  = fit_length // args.tensor_model_parallel_size * args.tensor_model_parallel_size 
+                _tokens, _labels, _loss_mask, _position_ids = _get_slice_data(
+                    tokens, labels, loss_mask, position_ids, 0, fit_length  
+                )
+                seq_info = Seq1F1BInfo(count, offset, 0, fit_length)
 
-                if mpu.is_pipeline_first_stage():
-                    _position_ids = position_ids[:, l_s : l_s + split]
-                    _tokens = tokens[:, l_s:l_s+split]
-                else:
-                    _position_ids = None
-                    _tokens = None
-
-                seq_info = Seq1F1BInfo(count, offset, l_s, l_s + split)
                 assert attention_mask is None
                 local_data = (_tokens, _labels, _loss_mask, attention_mask, _position_ids, seq_info)
-                l_s += split
-                if idx == offset:
-                    break
+            else:
+                start = 0
+                splits = solver.get_splits()  if args.curr_iteration % 2 == 0 else solver.base_solver.get_splits()
+                args.curr_splits = splits
+                for idx,split in enumerate(splits):
+                    _tokens, _labels, _loss_mask, _position_ids = _get_slice_data(
+                        tokens, labels, loss_mask, position_ids, start, start + split
+                    )
+                    seq_info = Seq1F1BInfo(count, offset, start, start + split)
+                    assert attention_mask is None
+                    local_data = (_tokens, _labels, _loss_mask, attention_mask, _position_ids, seq_info)
+                    start += split
+                    if idx == offset:
+                        break
 
-        elif global_args.seq1f1b_balance_method == "average":
+        elif args.seq1f1b_balance_method == "average":
             start = seq_length // pipe_sp * offset
             end = seq_length // pipe_sp * (offset+1)
             if mpu.is_pipeline_last_stage():
@@ -330,6 +355,8 @@ def forward_step(data_iterator, model: GPTModel):
             batch_seq_info = None
     timers('batch-generator').stop()
     args.batch_seq_info = batch_seq_info
+    span = args.batch_seq_info.span_idx_in_micro
+    timers(f"forward-span-{span}").start()
     with stimer:
         if args.use_legacy_models:
             output_tensor = model(tokens, position_ids, attention_mask,
@@ -342,7 +369,7 @@ def forward_step(data_iterator, model: GPTModel):
                 labels=labels,
                 loss_mask=loss_mask,
             )
-
+    timers(f"forward-span-{span}").stop()
     return output_tensor, partial(loss_func, loss_mask)
 
 
