@@ -13,3 +13,4 @@ wandb/
 onelogger.log
 onelogger.err
 examples/.DS_Store
+.arsync
