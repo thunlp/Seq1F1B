@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from torch import Tensor
+from typing import List
 
 @dataclass
 class SeqTFlops:
@@ -64,3 +65,16 @@ class Seq1F1BInfo:
     span_idx_in_micro: int
     span_start: int
     span_end: int
+    num_spans: int
+    splits: List
+
+    def __hash__(self):
+        return hash(
+            (
+                self.micro_batch_idx,
+                self.span_idx_in_micro,
+                self.span_start,
+                self.span_end,
+                self.num_spans,
+            )
+        )

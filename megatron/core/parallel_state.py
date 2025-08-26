@@ -78,6 +78,7 @@ _POSITION_EMBEDDING_GLOBAL_RANKS = None
 # A list of global ranks for each pipeline group to ease calculation of the source
 # rank when broadcasting from the first or last pipeline stage.
 _PIPELINE_GLOBAL_RANKS = None
+_PIPELINE_SEQ1F1B_INFO = None
 
 # A list of global ranks for each data parallel group to ease calculation of the source
 # rank when broadcasting weights from src to all other data parallel ranks
@@ -1459,6 +1460,13 @@ def get_tensor_model_parallel_rank():
         return _MPU_TENSOR_MODEL_PARALLEL_RANK
     return torch.distributed.get_rank(group=get_tensor_model_parallel_group())
 
+def get_pipeline_seq1f1b_info():
+    global _PIPELINE_SEQ1F1B_INFO
+    return _PIPELINE_SEQ1F1B_INFO
+
+def set_pipeline_seq1f1b_info(seq1f1b_info):
+    global _PIPELINE_SEQ1F1B_INFO
+    _PIPELINE_SEQ1F1B_INFO = seq1f1b_info
 
 def get_pipeline_model_parallel_rank():
     """Return caller's rank for the pipeline-model-parallel group."""

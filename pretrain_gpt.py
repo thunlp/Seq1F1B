@@ -39,7 +39,6 @@ from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_mtp_block_spec,
 )
 from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
-from megatron.core.pipeline_parallel.sequence_split import get_splits
 from megatron.core.pipeline_parallel.seq_utils import Seq1F1BInfo
 
 
@@ -136,82 +135,29 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
 
     return model
 
-def _get_batch_seq1f1b():
+def update_seq1f1b_info():
+    from megatron.core.pipeline_parallel.sequence_split import get_splits
+    args = get_args()
+    if args.seq1f1b_splits == 1:
+        return None
 
-    offset = -1
-    global_data = None
-    count = 0
-    def get_data(*args, **kwargs):
-        pipe_sp = get_args().seq1f1b_splits
-        nonlocal global_data, offset
-        nonlocal count
-        if offset == -1 or offset+1 == pipe_sp:
-            global_data = get_batch(*args,**kwargs)
-            # torch.save(global_data, f"./cache/data/global_data_{count}.pt")
-            count += 1
-
-        offset = (offset+1) % pipe_sp 
-        tokens, labels, loss_mask, attention_mask, position_ids = global_data
-            
-        global_args = get_args()
-        seq_length = global_args.seq_length
-        global_args.seq1f1b_balance_method = "average" if global_args.seq1f1b_splits == 1 else global_args.seq1f1b_balance_method
-        if global_args.seq1f1b_balance_method == "uniform_comp":
-            l_s = 0
-            for idx,split in enumerate(get_splits()):
-
-                if mpu.is_pipeline_last_stage():
-                    _labels = labels[:, l_s:l_s+split]
-                    _loss_mask = loss_mask
-                    _loss_mask._start = l_s
-                    _loss_mask._end = l_s+split
-                else:
-                    _labels = None
-                    _loss_mask = None
-
-                if mpu.is_pipeline_first_stage():
-                    _position_ids = position_ids[:, l_s : l_s + split]
-                    _tokens = tokens[:, l_s:l_s+split]
-                else:
-                    _position_ids = None
-                    _tokens = None
-
-                seq_info = Seq1F1BInfo(count, offset, l_s, l_s + split)
-                assert attention_mask is None
-                local_data = (_tokens, _labels, _loss_mask, attention_mask, _position_ids, seq_info)
-                l_s += split
-                if idx == offset:
-                    break
-
-        elif global_args.seq1f1b_balance_method == "average":
-            start = seq_length // pipe_sp * offset
-            end = seq_length // pipe_sp * (offset+1)
-            if mpu.is_pipeline_last_stage():
-                labels = labels.chunk(pipe_sp, dim=1)[offset]
-                loss_mask._start = start
-                loss_mask._end = end
-            else:
-                labels = None
-                loss_mask = None
-
-            if mpu.is_pipeline_first_stage():
-                tokens = tokens.chunk(pipe_sp, dim=1)[offset]
-                position_ids = position_ids.chunk(pipe_sp, dim=1)[offset]
-            else:
-                position_ids = None
-                tokens = None
-            seq_info = Seq1F1BInfo(count, offset, start, end)
-            local_data = (tokens, labels, loss_mask, attention_mask, position_ids, seq_info)
-
-        return local_data
-
-    return get_data
-
-get_batch_seq1f1b = _get_batch_seq1f1b()
+    splits = get_splits(args)
+    seq1f1b_info = mpu.get_pipeline_seq1f1b_info()
+    if seq1f1b_info is None:
+        seq1f1b_info = Seq1F1BInfo(0, 0, 0, splits[0], args.seq1f1b_splits, splits)
+    else:
+        last_span_idx = seq1f1b_info.span_idx_in_micro
+        seq1f1b_info.span_idx_in_micro = (seq1f1b_info.span_idx_in_micro + 1)  % args.seq1f1b_splits
+        seq1f1b_info.micro_batch_idx += 1 if seq1f1b_info.span_idx_in_micro == 0 else 0
+        seq1f1b_info.span_start = (seq1f1b_info.span_start + splits[last_span_idx]) % args.seq_length
+        seq1f1b_info.span_end = seq1f1b_info.span_start + splits[seq1f1b_info.span_idx_in_micro]
+    mpu.set_pipeline_seq1f1b_info(seq1f1b_info)
+    return seq1f1b_info
 
 def get_batch(data_iterator):
     """Generate a batch."""
 
+    seq1f1b_info = update_seq1f1b_info()
     # TODO: this is pretty hacky, find a better way
     if (not mpu.is_pipeline_first_stage()) and (not mpu.is_pipeline_last_stage()):
         return None, None, None, None, None
@@ -243,11 +189,12 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
             the data parallel ranks
     """
     args = get_args()
+    seq1f1b_info = mpu.get_pipeline_seq1f1b_info()
 
     losses = output_tensor.float()
     if args.seq1f1b_splits > 1:
-        start = loss_mask._start
-        end = loss_mask._end
+        start = seq1f1b_info.span_start
+        end = seq1f1b_info.span_end
         loss_mask_p = loss_mask[:, start:end]
         loss_mask = loss_mask.contiguous()
         loss_mask = loss_mask.view(-1).float()
@@ -322,12 +269,13 @@ def forward_step(data_iterator, model: GPTModel):
     global stimer
     with stimer(bdata=True):
         if args.seq1f1b_splits > 1:
-            tokens, labels, loss_mask, attention_mask, position_ids, batch_seq_info = get_batch_seq1f1b(
-                data_iterator)
+            tokens, labels, loss_mask, attention_mask, position_ids= (
+                get_batch(data_iterator)
+            )
         else:
             tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
                 data_iterator)
-            batch_seq_info = None
+
     timers('batch-generator').stop()
     args.batch_seq_info = batch_seq_info
     with stimer:

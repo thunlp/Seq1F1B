@@ -45,7 +45,12 @@ except ImportError:
 
 
 __all__ = ['apply_rotary_emb_flash']
-
+def get_pos_emb_on_this_span(pos_emb: Tensor, seq_dim: int):
+    seq1f1b_info = parallel_state.get_pipeline_seq1f1b_info()
+    span_idx = seq1f1b_info.span_idx_in_micro
+    splits = seq1f1b_info.splits
+    pos_emb = pos_emb.split(splits, dim = seq_dim)[span_idx]
+    return pos_emb
 
 def get_pos_emb_on_this_cp_rank(pos_emb: Tensor, seq_dim: int) -> Tensor:
     """Get the position embedding on the current context parallel rank.

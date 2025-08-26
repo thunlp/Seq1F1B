@@ -1,4 +1,3 @@
-from megatron.training import get_args
 from sympy import symbols, Eq, solve
 import torch
 from megatron.core.pipeline_parallel.seq_utils import SeqTFlops
@@ -59,20 +58,6 @@ class sequence_1f1b_queue:
 partitions = None
 
 
-def get_tflops():
-    args = get_args()
-    config = {
-        "num_layers": args.num_layers,
-        "hidden_size": args.hidden_size,
-        "ffn_size": args.ffn_hidden_size,
-        "num_heads": args.num_attention_heads,
-        "dim_head": args.hidden_size // args.num_attention_heads,
-        "vocab_size": args.padded_vocab_size,
-    }
-    config = SeqTFlops(**config)
-    tflops = config.get_seq_tflops(args.seq_length, causal=True)
-    return tflops
-
 class solver:
     def __init__(self, total_seqlen, config, causal=True):
         self.total_seqlen = total_seqlen 
@@ -94,10 +79,8 @@ class solver:
         res.insert(0, prefix)
         return res
 
-
-def get_splits():
+def get_splits(args):
     global partitions
-    args = get_args()
     if args.seq1f1b_balance_method == "average":
         return [args.seq_length // args.seq1f1b_splits] * args.seq1f1b_splits
     if args.seq1f1b_splits == 1:

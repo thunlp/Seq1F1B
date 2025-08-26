@@ -97,6 +97,7 @@ from .utils import (
     report_memory,
     unwrap_model,
     update_use_dist_ckpt,
+    seq1f1b_iterator
 )
 from .global_vars import (
     destroy_global_vars,
@@ -2434,6 +2435,8 @@ def build_train_valid_test_data_iterators(
 
     if train_dataloader is not None:
         train_data_iterator = _get_iterator(dl_type, train_dataloader)
+        if args.seq1f1b_splits > 1:
+            train_data_iterator = seq1f1b_iterator(train_data_iterator, args)
     else:
         train_data_iterator = None
 

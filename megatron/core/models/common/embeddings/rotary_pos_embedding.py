@@ -23,7 +23,6 @@ from megatron.core.models.common.embeddings.rope_utils import (  # for backward 
     _apply_rotary_pos_emb_thd,
     _rotate_half,
     apply_rotary_pos_emb,
-    get_pos_emb_on_this_cp_rank,
 )
 from megatron.core.utils import deprecate_inference_params
 
@@ -165,10 +164,6 @@ class RotaryEmbedding(nn.Module):
             )
         # emb [seq_length, .., dim]
         emb = emb[:, None, None, :]
-        if parallel_state.get_context_parallel_world_size() > 1 and not packed_seq:
-            # slice rotary_pos_emb along sequence dimension and select the parition of the current
-            # CP rank
-            emb = get_pos_emb_on_this_cp_rank(emb, 0)
         return emb
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
@@ -217,7 +212,9 @@ class RotaryEmbedding(nn.Module):
                 rotary_seq_len *= transformer_config.tensor_model_parallel_size
 
         rotary_seq_len *= transformer_config.context_parallel_size
-
+        seq1f1b_info = parallel_state.get_pipeline_seq1f1b_info() 
+        if seq1f1b_info is not None:
+            rotary_seq_len = sum(seq1f1b_info.splits)
         return rotary_seq_len
 
 

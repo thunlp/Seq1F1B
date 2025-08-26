@@ -15,6 +15,8 @@ from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.common.embeddings.rope_utils import (
     apply_rotary_pos_emb,
     apply_rotary_pos_emb_with_cos_sin,
+    get_pos_emb_on_this_cp_rank,
+    get_pos_emb_on_this_span
 )
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.parallel_state import (
@@ -209,6 +211,16 @@ class Attention(MegatronModule, ABC):
             dtype=dtype,
             device=torch.cuda.current_device(),
         )
+    def _adjust_rotary_pos_emb_for_sp(self, emb):
+        if parallel_state.get_pipeline_seq1f1b_info() is not None:
+            emb = get_pos_emb_on_this_span(emb, 0)
+
+        if parallel_state.get_context_parallel_world_size() > 1 and not packed_seq:
+            # slice rotary_pos_emb along sequence dimension and select the parition of the current
+            # CP rank
+            emb = get_pos_emb_on_this_cp_rank(emb, 0)
+        return emb
+        
 
     def _adjust_key_value_for_inference(
         self,
@@ -578,6 +590,8 @@ class Attention(MegatronModule, ABC):
             sequence_len_offset,
         )
 
+        rotary_pos_emb = (self._adjust_rotary_pos_emb_for_sp(emb) for emb in rotary_pos_emb)
+
         if packed_seq_params is not None:
             query = query.squeeze(1)
             key = key.squeeze(1)
@@ -642,13 +656,12 @@ class Attention(MegatronModule, ABC):
         else:
             if inference_context is None or inference_context.is_static_batching():
                 # Static batching attention kernel.
-                args = get_args()
-                if args.seq1f1b_splits > 1:
-                    batch_seq_info = args.batch_seq_info
+                seq1f1b_info = parallel_state.get_pipeline_seq1f1b_info()
+                if seq1f1b_info is not None:
                     span_info = SpanInfo(
-                        batch_seq_info.span_idx_in_micro,
-                        args.seq1f1b_splits,
-                        self.kv_cache_pool[batch_seq_info.micro_batch_idx],
+                        seq1f1b_info.span_idx_in_micro,
+                        seq1f1b_info.num_spans,
+                        self.kv_cache_pool[seq1f1b_info.micro_batch_idx],
                         0
                     )
                     signature = inspect.signature(self.core_attention.forward)
